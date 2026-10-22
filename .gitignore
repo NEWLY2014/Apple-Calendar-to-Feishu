@@ -1,0 +1,22 @@
+# macOS and editors
+.DS_Store
+.AppleDouble
+.idea/
+.vscode/
+# Build outputs
+build/
+dist/
+.build/
+*.app/
+*.dSYM/
+*.zip
+# Credentials, authorization assets, and sync state
+.env
+.env.*
+!.env.example
+.lark/
+.larksuite/
+*auth-qr*.png
+*config-qr*.png
+mappings.json
+*.log
