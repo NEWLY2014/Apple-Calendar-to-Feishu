@@ -145,8 +145,8 @@ private final class SyncViewController: NSViewController {
         configure(startPicker)
         configure(endPicker)
         let today = Calendar.current.startOfDay(for: Date())
-        startPicker.dateValue = Calendar.current.date(byAdding: .month, value: -1, to: today) ?? today
-        endPicker.dateValue = today
+        startPicker.dateValue = today
+        endPicker.dateValue = Calendar.current.date(byAdding: .month, value: 1, to: today) ?? today
 
         let dateRow = NSStackView(views: [
             NSTextField(labelWithString: "开始日期"), startPicker,
