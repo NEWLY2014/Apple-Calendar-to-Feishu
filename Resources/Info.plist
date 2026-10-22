@@ -8,8 +8,8 @@
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>CFBundleName</key><string>Apple日历同步到飞书</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.0.1</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>用于读取你选择的 Apple 日历日程，并在确认后同步到飞书主日历。</string>
 <key>NSCalendarsUsageDescription</key><string>用于读取你选择的 Apple 日历日程，并在确认后同步到飞书主日历。</string>

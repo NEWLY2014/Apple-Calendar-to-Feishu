@@ -12,10 +12,16 @@
 
 本工具单向同步 Apple 日历到飞书，每次需手动运行，不在后台自动同步。Apple 中的重复日程会按所选范围内的单次实例处理。
 
+## 下载与安装
+
+从 [GitHub Releases](https://github.com/NEWLY2014/Apple-Calendar-to-Feishu/releases/latest) 下载 DMG 或 ZIP。安装包为通用版本，支持 Apple 芯片与 Intel Mac，macOS 14 起可用，无需自行编译。
+
+打开 DMG 后把应用拖入 Applications。首次打开的系统提示与飞书 CLI 配置步骤见 [安装说明](docs/安装说明.md)。应用依赖单独安装并授权的 `lark-cli`；当前发布包使用临时签名，尚未进行 Apple 公证。
+
 ## 运行要求
 
 - macOS 14 或更新版本。
-- 构建需要 Xcode Command Line Tools（提供 `swiftc`、macOS SDK 和签名工具）。
+- 仅从源码构建时需要 Xcode Command Line Tools（提供 `swiftc`、macOS SDK 和签名工具）。
 - 安装并配置飞书官方 [lark-cli](https://github.com/larksuite/cli)，完成用户身份授权，并授予创建、修改和删除日历日程所需的权限。
 - 应用在 `/opt/homebrew/bin/lark-cli` 或 `/usr/local/bin/lark-cli` 查找 CLI。若安装在其他位置，需调整源码中的 `callCLI` 路径。
 
@@ -36,6 +42,14 @@ open "build/Apple日历同步到飞书.app"
 ```sh
 APPLE_FEISHU_BUILD_DIR="${TMPDIR:-/tmp}/apple-feishu-build" ./scripts/build.sh
 ```
+
+## 打包 Release
+
+```sh
+./scripts/release.sh
+```
+
+脚本在本机临时目录编译 arm64 与 x86_64 两种架构，生成通用应用，并在 `dist/` 输出 DMG、ZIP、安装说明和 SHA-256 校验文件。可通过 `APPLE_FEISHU_DIST_DIR` 指定输出目录。脚本仅打包，不会自动发布到 GitHub。
 
 ## 使用
 
@@ -58,6 +72,8 @@ APPLE_FEISHU_BUILD_DIR="${TMPDIR:-/tmp}/apple-feishu-build" ./scripts/build.sh
 ```text
 Sources/AppleToFeishuSync.swift   应用界面、EventKit 读取、同步与状态保存
 Resources/Info.plist             应用标识与日历权限说明
-scripts/build.sh                 编译、打包和本地临时签名
+scripts/build.sh                 编译与本地临时签名
+scripts/release.sh               构建通用版并生成 DMG、ZIP 和校验文件
+docs/安装说明.md                下载、安装与飞书连接说明
 docs/使用说明.md                使用说明
 ```
