@@ -31,6 +31,12 @@ open "build/Apple日历同步到飞书.app"
 
 脚本为当前 Mac 的 CPU 架构构建应用，并执行本地临时签名。构建产物位于 `build/`，不纳入 Git。临时签名不等同于 Apple Developer ID 签名或公证。
 
+如果项目目录由云盘或文件同步服务管理，服务附加的 Finder 扩展属性可能使签名验证失败。可以将构建输出放到本机临时目录：
+
+```sh
+APPLE_FEISHU_BUILD_DIR="${TMPDIR:-/tmp}/apple-feishu-build" ./scripts/build.sh
+```
+
 ## 使用
 
 1. 打开应用，允许访问 Apple 日历。

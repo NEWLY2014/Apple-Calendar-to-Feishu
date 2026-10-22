@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/build"
+BUILD_DIR="${APPLE_FEISHU_BUILD_DIR:-$ROOT_DIR/build}"
 APP_PATH="$BUILD_DIR/Apple日历同步到飞书.app"
 ARCH="$(uname -m)"
 
