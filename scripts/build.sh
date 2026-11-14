@@ -24,7 +24,7 @@ for ARCH in $ARCHS; do
     -framework Cocoa \
     -framework EventKit \
     -framework CryptoKit \
-    "$ROOT_DIR/Sources/AppleToFeishuSync.swift" \
+    "$ROOT_DIR"/Sources/*.swift \
     -o "$BINARY"
   BINARIES+=("$BINARY")
 done

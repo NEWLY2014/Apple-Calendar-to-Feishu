@@ -1,6 +1,7 @@
 import Cocoa
 @preconcurrency import EventKit
 import CryptoKit
+import CoreImage.CIFilterBuiltins
 
 private struct SyncRecord: Codable {
     var sourceKey: String
@@ -106,19 +107,18 @@ private final class CalendarChoice {
     }
 }
 
-private enum CLIError: LocalizedError {
-    case missing
-    case failed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .missing: return "未找到飞书官方 CLI。请确认 lark-cli 已安装。"
-        case .failed(let message): return message
-        }
-    }
-}
-
 private final class SyncViewController: NSViewController {
+    private let cli = FeishuCLI()
+    private var hasLoaded = false
+    private var isBusy = false
+    private var authorizationCancellation: CLICancellation?
+    private var authorizationPanel: NSPanel?
+    private var authorizationURL: URL?
+    private var activeBatch: SyncBatch<PreviewItem>?
+    private let connectionLabel = NSTextField(labelWithString: "正在检查飞书连接…")
+    private let connectButton = NSButton(title: "连接／重新授权飞书", target: nil, action: nil)
+    private let selectAllButton = NSButton(title: "全选", target: nil, action: nil)
+    private let selectNoneButton = NSButton(title: "全不选", target: nil, action: nil)
     private let eventStore = EKEventStore()
     private var choices: [CalendarChoice] = []
     private var previewItems: [PreviewItem] = []
@@ -136,11 +136,20 @@ private final class SyncViewController: NSViewController {
     private let syncButton = NSButton(title: "开始同步", target: nil, action: nil)
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 660))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 760, height: 730))
         let title = NSTextField(labelWithString: "Apple 日历 → 飞书手动同步")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         let subtitle = NSTextField(wrappingLabelWithString: "每次由你选择范围、预览变化并确认。同步到飞书主日历的日程会标记为忙碌。")
         subtitle.textColor = .secondaryLabelColor
+
+        connectButton.target = self
+        connectButton.action = #selector(connectFeishu)
+        connectionLabel.textColor = .secondaryLabelColor
+        connectionLabel.lineBreakMode = .byTruncatingTail
+        let connectionRow = NSStackView(views: [connectButton, connectionLabel])
+        connectionRow.orientation = .horizontal
+        connectionRow.spacing = 12
+        connectionRow.alignment = .centerY
 
         configure(startPicker)
         configure(endPicker)
@@ -176,17 +185,23 @@ private final class SyncViewController: NSViewController {
             calendarStack.widthAnchor.constraint(equalTo: calendarScroll.contentView.widthAnchor)
         ])
 
-        let selectAll = NSButton(title: "全选", target: self, action: #selector(selectAllCalendars))
-        selectAll.bezelStyle = .inline
-        let selectNone = NSButton(title: "全不选", target: self, action: #selector(selectNoCalendars))
-        selectNone.bezelStyle = .inline
-        let selectionRow = NSStackView(views: [selectAll, selectNone])
+        selectAllButton.target = self
+        selectAllButton.action = #selector(selectAllCalendars)
+        selectAllButton.bezelStyle = .inline
+        selectNoneButton.target = self
+        selectNoneButton.action = #selector(selectNoCalendars)
+        selectNoneButton.bezelStyle = .inline
+        let selectionRow = NSStackView(views: [selectAllButton, selectNoneButton])
         selectionRow.orientation = .horizontal
         selectionRow.spacing = 12
 
         privateEvents.state = .on
         includeAllDay.state = .off
         syncDeletions.state = .off
+        for control in [includeAllDay, privateEvents, syncDeletions] {
+            control.target = self
+            control.action = #selector(invalidatePreview)
+        }
         let options = NSStackView(views: [privateEvents, includeAllDay, syncDeletions])
         options.orientation = .vertical
         options.alignment = .leading
@@ -222,7 +237,7 @@ private final class SyncViewController: NSViewController {
         statusLabel.lineBreakMode = .byTruncatingTail
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let main = NSStackView(views: [title, subtitle, dateRow, calendarHeader, calendarScroll, selectionRow, options, previewHeader, previewScroll, bottom])
+        let main = NSStackView(views: [title, subtitle, connectionRow, dateRow, calendarHeader, calendarScroll, selectionRow, options, previewHeader, previewScroll, bottom])
         main.orientation = .vertical
         main.alignment = .leading
         main.spacing = 10
@@ -244,14 +259,19 @@ private final class SyncViewController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        guard !hasLoaded else { return }
+        hasLoaded = true
         loadRecords()
         requestCalendarAccess()
+        checkConnection()
     }
 
     private func configure(_ picker: NSDatePicker) {
         picker.datePickerStyle = .textFieldAndStepper
         picker.datePickerElements = .yearMonthDay
         picker.locale = Locale(identifier: "zh_CN")
+        picker.target = self
+        picker.action = #selector(invalidatePreview)
     }
 
     private func requestCalendarAccess() {
@@ -272,9 +292,14 @@ private final class SyncViewController: NSViewController {
             .sorted { ($0.source.title, $0.title) < ($1.source.title, $1.title) }
             .map(CalendarChoice.init)
         calendarStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        choices.forEach { calendarStack.addArrangedSubview($0.button) }
-        statusLabel.stringValue = "飞书已连接；找到 \(choices.count) 个 Apple 日历"
-        previewButton.isEnabled = !choices.isEmpty
+        choices.forEach {
+            $0.button.target = self
+            $0.button.action = #selector(invalidatePreview)
+            $0.button.isEnabled = !isBusy
+            calendarStack.addArrangedSubview($0.button)
+        }
+        statusLabel.stringValue = "找到 \(choices.count) 个 Apple 日历"
+        previewButton.isEnabled = !isBusy && !choices.isEmpty
     }
 
     private func showCalendarAccessError(_ error: Error?) {
@@ -282,10 +307,171 @@ private final class SyncViewController: NSViewController {
         showAlert("需要访问 Apple 日历", "请在“系统设置 → 隐私与安全性 → 日历”中允许本工具访问。" + (error.map { "\n\($0.localizedDescription)" } ?? ""))
     }
 
-    @objc private func selectAllCalendars() { choices.forEach { $0.button.state = .on } }
-    @objc private func selectNoCalendars() { choices.forEach { $0.button.state = .off } }
+    @objc private func selectAllCalendars() { choices.forEach { $0.button.state = .on }; invalidatePreview() }
+    @objc private func selectNoCalendars() { choices.forEach { $0.button.state = .off }; invalidatePreview() }
+
+    @objc private func invalidatePreview() {
+        guard !isBusy else { return }
+        previewItems = []
+        syncButton.isEnabled = false
+        previewText.string = "设置已变化，请重新点击“预览变化”。"
+    }
+
+    private func setBusy(_ busy: Bool) {
+        isBusy = busy
+        for control: NSControl in [startPicker, endPicker, includeAllDay, privateEvents, syncDeletions, selectAllButton, selectNoneButton] {
+            control.isEnabled = !busy
+        }
+        choices.forEach { $0.button.isEnabled = !busy }
+        connectButton.isEnabled = !busy
+        previewButton.isEnabled = !busy && !choices.isEmpty
+        syncButton.isEnabled = !busy && previewItems.contains { [.create, .update, .delete].contains($0.action) }
+    }
+
+    private func checkConnection() {
+        guard !isBusy else { return }
+        setBusy(true)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result { try self.cli.identity() }
+            DispatchQueue.main.async {
+                self.setBusy(false)
+                switch result {
+                case .success(let identity): self.displayIdentity(identity)
+                case .failure: self.connectionLabel.stringValue = "飞书连接不可用，请点击连接按钮"
+                }
+            }
+        }
+    }
+
+    private func displayIdentity(_ identity: FeishuIdentity) {
+        connectionLabel.stringValue = identity.isReady
+            ? "飞书已连接" + (identity.name.map { "：\($0)" } ?? "")
+            : "尚未连接或授权已失效"
+    }
+
+    @objc private func connectFeishu() {
+        guard !isBusy else { return }
+        beginAuthorization()
+    }
+
+    private func beginAuthorization() {
+        let cancellation = CLICancellation()
+        authorizationCancellation = cancellation
+        setBusy(true)
+        connectionLabel.stringValue = "正在获取飞书授权链接…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let authorization = try self.cli.beginAuthorization(cancellation: cancellation)
+                DispatchQueue.main.async {
+                    guard !cancellation.isCancelled else { return }
+                    self.showAuthorization(authorization)
+                }
+                let identity = try self.cli.finishAuthorization(authorization, cancellation: cancellation)
+                DispatchQueue.main.async { self.authorizationFinished(.success(identity)) }
+            } catch {
+                DispatchQueue.main.async { self.authorizationFinished(.failure(error)) }
+            }
+        }
+    }
+
+    private func showAuthorization(_ authorization: FeishuAuthorization) {
+        authorizationURL = authorization.url
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 490), styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = "连接飞书"
+        let title = NSTextField(labelWithString: "请用原来的飞书账号扫码授权")
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        let detail = NSTextField(wrappingLabelWithString: activeBatch == nil
+            ? "完成授权后会自动检查连接，随后可继续预览和同步。"
+            : "完成授权后会自动继续本次已确认的同步，已完成的日程不会重复处理。")
+        let qr = NSImageView()
+        qr.imageScaling = .scaleProportionallyUpOrDown
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(authorization.url.absoluteString.utf8)
+        if let output = filter.outputImage,
+           let image = CIContext().createCGImage(output.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), from: output.extent.applying(CGAffineTransform(scaleX: 8, y: 8))) {
+            qr.image = NSImage(cgImage: image, size: NSSize(width: 224, height: 224))
+        }
+        let link = NSTextField(wrappingLabelWithString: authorization.url.absoluteString)
+        link.isSelectable = true
+        link.font = .systemFont(ofSize: 11)
+        link.textColor = .secondaryLabelColor
+        let expiry = NSTextField(labelWithString: "授权链接约 \(max(1, Int(authorization.expiresIn / 60))) 分钟内有效；正在等待授权…")
+        expiry.textColor = .secondaryLabelColor
+        let open = NSButton(title: "打开授权页面", target: self, action: #selector(openAuthorizationPage))
+        let cancel = NSButton(title: "取消授权", target: self, action: #selector(cancelAuthorization))
+        let buttons = NSStackView(views: [open, cancel])
+        buttons.spacing = 12
+        let stack = NSStackView(views: [title, detail, qr, link, expiry, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView!.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24),
+            detail.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            link.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            qr.widthAnchor.constraint(equalToConstant: 224), qr.heightAnchor.constraint(equalToConstant: 224)
+        ])
+        authorizationPanel = panel
+        connectionLabel.stringValue = "等待飞书扫码或网页授权…"
+        view.window?.beginSheet(panel)
+        openAuthorizationPage()
+    }
+
+    @objc private func openAuthorizationPage() {
+        if let authorizationURL { NSWorkspace.shared.open(authorizationURL) }
+    }
+
+    @objc private func cancelAuthorization() {
+        guard let cancellation = authorizationCancellation else { return }
+        cancellation.cancel()
+        connectionLabel.stringValue = "正在取消授权…"
+    }
+
+    func stopRunningCommands() {
+        authorizationCancellation?.cancel()
+        cli.cancelRunningCommands()
+    }
+
+    private func authorizationFinished(_ result: Result<FeishuIdentity, Error>) {
+        let outcome: Result<FeishuIdentity, Error> = authorizationCancellation?.isCancelled == true
+            ? .failure(CLIError.cancelled) : result
+        if let panel = authorizationPanel { view.window?.endSheet(panel); panel.orderOut(nil) }
+        authorizationPanel = nil
+        authorizationURL = nil
+        authorizationCancellation = nil
+        switch outcome {
+        case .success(let identity):
+            displayIdentity(identity)
+            if let batch = activeBatch {
+                do { try batch.acceptIdentity(identity) }
+                catch {
+                    stopBatch("飞书账号已变化", error.localizedDescription)
+                    return
+                }
+                continueSync(batch)
+            } else {
+                setBusy(false)
+                statusLabel.stringValue = "授权成功，可以继续同步"
+            }
+        case .failure(let error):
+            connectionLabel.stringValue = "未完成授权，请重新连接"
+            if activeBatch != nil {
+                stopBatch("同步已暂停", error.localizedDescription + "\n已完成的日程已保存；重新连接后，请预览并确认剩余项目。")
+            } else {
+                setBusy(false)
+                showAlert("未完成飞书授权", error.localizedDescription)
+            }
+        }
+    }
 
     @objc private func buildPreview() {
+        guard !isBusy else { return }
         let selected = choices.filter { $0.button.state == .on }.map(\.calendar)
         guard !selected.isEmpty else { showAlert("未选择日历", "请至少选择一个来源日历。"); return }
         let systemCalendar = Calendar.current
@@ -361,92 +547,95 @@ private final class SyncViewController: NSViewController {
     }
 
     private func runSync() {
-        let actionable = previewItems.filter { [.create, .update, .delete].contains($0.action) }
-        previewButton.isEnabled = false
-        syncButton.isEnabled = false
-        statusLabel.stringValue = "正在同步 0 / \(actionable.count)…"
-
+        let batch = SyncBatch(items: previewItems.filter { [.create, .update, .delete].contains($0.action) })
+        guard !batch.items.isEmpty else { return }
+        activeBatch = batch
+        setBusy(true)
+        statusLabel.stringValue = "正在检查飞书授权…"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var succeeded = 0
-            var failures: [String] = []
-            for (index, item) in actionable.enumerated() {
-                do {
-                    switch item.action {
-                    case .create:
-                        guard let snapshot = item.snapshot else { continue }
-                        let response = try self.callCLI([
-                            "calendar", "events", "create", "--as", "user", "--calendar-id", "primary",
-                            "--idempotency-key", self.hash(snapshot.sourceKey), "--data", self.json(snapshot.payload), "--format", "json"
-                        ])
-                        guard let eventID = self.eventID(from: response) else { throw CLIError.failed("飞书未返回日程 ID") }
-                        self.records[snapshot.sourceKey] = self.record(for: snapshot, eventID: eventID)
-                    case .update:
-                        guard let snapshot = item.snapshot, let old = item.record else { continue }
-                        _ = try self.callCLI([
-                            "calendar", "events", "patch", "--as", "user", "--calendar-id", "primary",
-                            "--event-id", old.feishuEventID, "--data", self.json(snapshot.payload), "--format", "json"
-                        ])
-                        self.records[snapshot.sourceKey] = self.record(for: snapshot, eventID: old.feishuEventID)
-                    case .delete:
-                        guard let old = item.record else { continue }
-                        _ = try self.callCLI([
-                            "calendar", "events", "delete", "--as", "user", "--calendar-id", "primary",
-                            "--event-id", old.feishuEventID, "--need-notification", "false", "--format", "json"
-                        ])
-                        self.records.removeValue(forKey: old.sourceKey)
-                    default: continue
-                    }
-                    try self.saveRecords()
-                    succeeded += 1
-                } catch {
-                    let title = item.snapshot?.event.title ?? item.record?.title ?? "未知日程"
-                    failures.append("\(title)：\(error.localizedDescription)")
+            do {
+                let identity = try self.cli.identity()
+                batch.expectedOpenID = identity.openID
+                DispatchQueue.main.async {
+                    self.displayIdentity(identity)
+                    if identity.isReady { self.continueSync(batch) }
+                    else { batch.attemptedAuthorization = true; self.beginAuthorization() }
                 }
-                DispatchQueue.main.async { self.statusLabel.stringValue = "正在同步 \(index + 1) / \(actionable.count)…" }
-            }
-            DispatchQueue.main.async {
-                self.previewButton.isEnabled = true
-                self.statusLabel.stringValue = failures.isEmpty ? "同步完成：成功 \(succeeded) 项" : "同步完成：成功 \(succeeded) 项，失败 \(failures.count) 项"
-                if failures.isEmpty {
-                    self.showAlert("同步完成", "已成功处理 \(succeeded) 个飞书日程，并标记为忙碌。")
-                } else {
-                    self.showAlert("部分日程同步失败", failures.prefix(8).joined(separator: "\n"))
-                }
-                self.buildPreview()
+            } catch {
+                DispatchQueue.main.async { self.stopBatch("无法连接飞书", error.localizedDescription) }
             }
         }
     }
 
-    private func callCLI(_ arguments: [String]) throws -> [String: Any] {
-        let candidates = ["/opt/homebrew/bin/lark-cli", "/usr/local/bin/lark-cli"]
-        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { throw CLIError.missing }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let cliDirectory = URL(fileURLWithPath: executable).deletingLastPathComponent().path
-        environment["PATH"] = [cliDirectory, "/opt/homebrew/bin", "/usr/local/bin", existingPath].joined(separator: ":")
-        environment["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
-        environment["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
-        process.environment = environment
-        let output = Pipe(), error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        try process.run()
-        process.waitUntilExit()
-        let stdout = output.fileHandleForReading.readDataToEndOfFile()
-        let stderr = error.fileHandleForReading.readDataToEndOfFile()
-        let data = stdout.isEmpty ? stderr : stdout
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw CLIError.failed(String(data: data, encoding: .utf8) ?? "飞书命令返回了无法识别的结果")
+    private func continueSync(_ batch: SyncBatch<PreviewItem>) {
+        statusLabel.stringValue = "正在同步 \(batch.nextIndex) / \(batch.items.count)…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let finished = batch.run(perform: self.syncItem, title: {
+                $0.snapshot?.event.title ?? $0.record?.title ?? "未知日程"
+            }, progress: { index in
+                DispatchQueue.main.async { self.statusLabel.stringValue = "正在同步 \(index) / \(batch.items.count)…" }
+            })
+            DispatchQueue.main.async {
+                if !finished {
+                    self.connectionLabel.stringValue = "飞书授权已失效"
+                    if batch.attemptedAuthorization {
+                        self.stopBatch("同步已暂停", "重新授权后仍无法操作日历。请检查飞书应用权限，再预览并确认剩余项目。")
+                    } else {
+                        batch.attemptedAuthorization = true
+                        self.beginAuthorization()
+                    }
+                    return
+                }
+                self.activeBatch = nil
+                self.setBusy(false)
+                self.buildPreview()
+                self.statusLabel.stringValue = "同步完成：成功 \(batch.succeeded) 项，失败 \(batch.failures.count) 项"
+                if batch.failures.isEmpty {
+                    self.showAlert("同步完成", "已成功处理 \(batch.succeeded) 个飞书日程，并标记为忙碌。")
+                } else {
+                    self.showAlert("部分日程同步失败", batch.failures.prefix(8).joined(separator: "\n"))
+                }
+            }
         }
-        if process.terminationStatus != 0 || (object["ok"] as? Bool) != true {
-            let errorObject = object["error"] as? [String: Any]
-            throw CLIError.failed(errorObject?["message"] as? String ?? "飞书操作失败（代码 \(process.terminationStatus)）")
+    }
+
+    private func stopBatch(_ title: String, _ message: String) {
+        activeBatch = nil
+        setBusy(false)
+        buildPreview()
+        statusLabel.stringValue = title
+        showAlert(title, message)
+    }
+
+    private func syncItem(_ item: PreviewItem) throws {
+        switch item.action {
+        case .create:
+            guard let snapshot = item.snapshot else { return }
+            let response = try cli.call([
+                "calendar", "events", "create", "--as", "user", "--calendar-id", "primary",
+                "--idempotency-key", hash(snapshot.sourceKey), "--data", json(snapshot.payload), "--format", "json"
+            ])
+            guard let eventID = eventID(from: response) else { throw CLIError.failed("飞书未返回日程 ID") }
+            records[snapshot.sourceKey] = record(for: snapshot, eventID: eventID)
+        case .update:
+            guard let snapshot = item.snapshot, let old = item.record else { return }
+            _ = try cli.call([
+                "calendar", "events", "patch", "--as", "user", "--calendar-id", "primary",
+                "--event-id", old.feishuEventID, "--data", json(snapshot.payload), "--format", "json"
+            ])
+            records[snapshot.sourceKey] = record(for: snapshot, eventID: old.feishuEventID)
+        case .delete:
+            guard let old = item.record else { return }
+            _ = try cli.call([
+                "calendar", "events", "delete", "--as", "user", "--calendar-id", "primary",
+                "--event-id", old.feishuEventID, "--need-notification", "false", "--format", "json"
+            ])
+            records.removeValue(forKey: old.sourceKey)
+        default: return
         }
-        return object
+        try saveRecords()
     }
 
     private func eventID(from response: [String: Any]) -> String? {
@@ -502,17 +691,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentViewController: SyncViewController())
         window.title = "Apple 日历 → 飞书手动同步"
-        window.setContentSize(NSSize(width: 720, height: 660))
+        window.setContentSize(NSSize(width: 760, height: 730))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) {
+        (window.contentViewController as? SyncViewController)?.stopRunningCommands()
+    }
 }
 
-let application = NSApplication.shared
-private let delegate = AppDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.regular)
-application.run()
+@main
+private enum AppleToFeishuApplication {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        application.run()
+        withExtendedLifetime(delegate) {}
+    }
+}

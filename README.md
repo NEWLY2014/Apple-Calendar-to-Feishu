@@ -4,6 +4,7 @@
 
 ## 功能
 
+- 在应用内连接或重新授权飞书，支持二维码和网页授权；已确认的同步因授权失效暂停后，授权成功会自动继续剩余项目。
 - 选择日期范围和来源日历，预览新增、更新、无变化及删除项目后手动确认同步。
 - 同步后的日程标记为忙碌，默认设为私密；不开启提醒、不邀请参会人、不发送通知、不创建视频会议。
 - 全天日程默认关闭，可手动开启。
@@ -23,9 +24,9 @@
 - macOS 14 或更新版本。
 - 仅从源码构建时需要 Xcode Command Line Tools（提供 `swiftc`、macOS SDK 和签名工具）。
 - 安装并配置飞书官方 [lark-cli](https://github.com/larksuite/cli)，完成用户身份授权，并授予创建、修改和删除日历日程所需的权限。
-- 应用在 `/opt/homebrew/bin/lark-cli` 或 `/usr/local/bin/lark-cli` 查找 CLI。若安装在其他位置，需调整源码中的 `callCLI` 路径。
+- 应用在 `/opt/homebrew/bin/lark-cli` 或 `/usr/local/bin/lark-cli` 查找 CLI。若安装在其他位置，需调整 `Sources/FeishuCLI.swift` 中的 CLI 查找路径。
 
-可先在终端执行 `lark-cli auth status` 检查授权，并用 `lark-cli calendar events create --help` 检查所安装版本的日历命令接口。应用不会内置或自动配置你的飞书应用凭据。
+可先在终端执行 `lark-cli auth status` 检查授权，并用 `lark-cli calendar events create --help` 检查所安装版本的日历命令接口。也可直接在应用中点击“连接／重新授权飞书”完成用户授权；初次安装 CLI 及配置飞书应用仍需按官方说明进行。应用不会内置你的飞书应用凭据。
 
 ## 构建
 
@@ -53,7 +54,7 @@ APPLE_FEISHU_BUILD_DIR="${TMPDIR:-/tmp}/apple-feishu-build" ./scripts/build.sh
 
 ## 使用
 
-1. 打开应用，允许访问 Apple 日历。
+1. 打开应用，允许访问 Apple 日历，点击“连接／重新授权飞书”完成授权。
 2. 选择开始日期、结束日期和需要同步的来源日历。默认日期范围为当天至一个月后。
 3. 按需调整私密、全天日程及删除同步选项。
 4. 点击“预览变化”，检查待处理日程。
@@ -71,9 +72,15 @@ APPLE_FEISHU_BUILD_DIR="${TMPDIR:-/tmp}/apple-feishu-build" ./scripts/build.sh
 
 ```text
 Sources/AppleToFeishuSync.swift   应用界面、EventKit 读取、同步与状态保存
+Sources/FeishuCLI.swift           CLI 调用、授权流程、同步断点与继续处理
+Tests/                           授权及断点继续处理测试（不访问真实日历）
 Resources/Info.plist             应用标识与日历权限说明
 scripts/build.sh                 编译与本地临时签名
 scripts/release.sh               构建通用版并生成 DMG、ZIP 和校验文件
 docs/安装说明.md                下载、安装与飞书连接说明
 docs/使用说明.md                使用说明
 ```
+
+## 验证
+
+运行 `./scripts/test.sh` 验证授权状态识别、设备授权流程、断点继续、账号一致性、取消、超时及输出读取；测试使用本地模拟 CLI，不接触真实日历或凭据。
